@@ -502,6 +502,17 @@ jobs:
           version: ${{ inputs.version }}
           allow_version_mismatch: true
 
+      - name: Apply GB nomedia mtime FUSE fixup
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -euo pipefail
+          echo 'CiNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTX1NVU19LU1RBVAovKiBHQjogcHVzaCBhZ2VkL2Rpc3RpbmN0IC5ub21lZGlhIHRpbWVzdGFtcHMgdGhyb3VnaCBGVVNFIHdyaXRlYmFjay1jYWNoZS4KICogQWZ0ZXIgZnVzZV9nZXRhdHRyLCBzdGF0LT5pbm8gaXMgYWxyZWFkeSB0aGUgc3Bvb2ZlZCB2YWx1ZSAoZGFlbW9uIGxvd2VyLXJlYWQgdmlhCiAqIHN1c19rc3RhdCkgYnV0IHdyaXRlYmFjay1jYWNoZSBrZWVwcyB0aGUgcmVhbCBtdGltZS9jdGltZS4gTWF0Y2ggdGhlIHJlc3VsdGluZwogKiBzcG9vZmVkIGlubyBhZ2FpbnN0IFNVU19LU1RBVF9ITElTVCBhbmQgb3ZlcndyaXRlIHRoZSB0aW1lIGZpZWxkcyBoZXJlLCBhZnRlcgogKiBmdXNlX2dldGF0dHIsIHNvIHRoZSBtZW1iZXIgcmVhZHMgdGhlIHBlci1zZWFsIGFnZWQgdGltZXN0YW1wcyB0b28uICovCnZvaWQgc3VzZnNfc3VzX2tzdGF0X2Z1c2VfZml4dXBfdGltZXMoc3RydWN0IGtzdGF0ICpzdGF0KSB7CglzdHJ1Y3Qgc3Rfc3VzZnNfc3VzX2tzdGF0X2hsaXN0ICplbnRyeSA9IE5VTEw7CglpbnQgYmt0OwoJcmN1X3JlYWRfbG9jaygpOwoJaGFzaF9mb3JfZWFjaF9yY3UoU1VTX0tTVEFUX0hMSVNULCBia3QsIGVudHJ5LCBub2RlKSB7CgkJaWYgKGVudHJ5LT5pbmZvLnNwb29mZWRfaW5vID09IHN0YXQtPmlubykgewoJCQlpZiAoZW50cnktPmluZm8uZmxhZ3MgJiBLU1RBVF9TUE9PRl9BVElNRV9UVl9TRUMpCgkJCQlzdGF0LT5hdGltZS50dl9zZWMgPSBlbnRyeS0+aW5mby5zcG9vZmVkX2F0aW1lX3R2X3NlYzsKCQkJaWYgKGVudHJ5LT5pbmZvLmZsYWdzICYgS1NUQVRfU1BPT0ZfQVRJTUVfVFZfTlNFQykKCQkJCXN0YXQtPmF0aW1lLnR2X25zZWMgPSBlbnRyeS0+aW5mby5zcG9vZmVkX2F0aW1lX3R2X25zZWM7CgkJCWlmIChlbnRyeS0+aW5mby5mbGFncyAmIEtTVEFUX1NQT09GX01USU1FX1RWX1NFQykKCQkJCXN0YXQtPm10aW1lLnR2X3NlYyA9IGVudHJ5LT5pbmZvLnNwb29mZWRfbXRpbWVfdHZfc2VjOwoJCQlpZiAoZW50cnktPmluZm8uZmxhZ3MgJiBLU1RBVF9TUE9PRl9NVElNRV9UVl9OU0VDKQoJCQkJc3RhdC0+bXRpbWUudHZfbnNlYyA9IGVudHJ5LT5pbmZvLnNwb29mZWRfbXRpbWVfdHZfbnNlYzsKCQkJaWYgKGVudHJ5LT5pbmZvLmZsYWdzICYgS1NUQVRfU1BPT0ZfQ1RJTUVfVFZfU0VDKQoJCQkJc3RhdC0+Y3RpbWUudHZfc2VjID0gZW50cnktPmluZm8uc3Bvb2ZlZF9jdGltZV90dl9zZWM7CgkJCWlmIChlbnRyeS0+aW5mby5mbGFncyAmIEtTVEFUX1NQT09GX0NUSU1FX1RWX05TRUMpCgkJCQlzdGF0LT5jdGltZS50dl9uc2VjID0gZW50cnktPmluZm8uc3Bvb2ZlZF9jdGltZV90dl9uc2VjOwoJCQlicmVhazsKCQl9Cgl9CglyY3VfcmVhZF91bmxvY2soKTsKfQojZW5kaWYK' | base64 -d >> fs/susfs.c
+          perl -0777 -i -pe 's/(int err = inode->i_op->getattr\(mnt_userns, path, stat,\s*request_mask, query_flags\);\s*if \(!err\) \{)/$1\n\t\t\t{ extern void susfs_sus_kstat_fuse_fixup_times(struct kstat *stat); if (susfs_is_current_app_uid()) susfs_sus_kstat_fuse_fixup_times(stat); }/' fs/stat.c
+          grep -q "susfs_sus_kstat_fuse_fixup_times(struct kstat" fs/susfs.c || { echo FAIL-helper; exit 1; }
+          grep -q "susfs_sus_kstat_fuse_fixup_times(stat);" fs/stat.c || { echo FAIL-call; exit 1; }
+          echo "GB nomedia mtime FUSE fixup applied"
+
       - name: Build Normal Kernel
         env:
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
