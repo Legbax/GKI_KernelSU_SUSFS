@@ -555,9 +555,17 @@ jobs:
           # CLOCK_MONOTONIC = realtime + wall_to_monotonic; bumping wall_to_mono shifts mono/boot only,
           # REALTIME (xtime) stays = RTC. The mint banks the resulting /proc/uptime as the account
           # u_login (no master_seed needed at init, no post-fs-data knob, no mid-run jump).
-          perl -0777 -i -pe 's/(wall_to_mono = timespec64_sub\(boot_offset, wall_time\);)/$1\n\twall_to_mono.tv_sec += 259200 + (random_get_entropy() % 345600);/' kernel/time/timekeeping.c
-          grep -q "wall_to_mono.tv_sec += 259200" kernel/time/timekeeping.c || { echo FAIL-tkv2; exit 1; }
-          echo "GB v2 random monotonic/boottime offset [3d,7d) per boot applied (de-correlation)"
+          # Coherent: monotonic (awake) = 20-54% of boottime (device age), matching virtual_clock's
+          # duty cycle, so the login folds mono<boot (realistic) AND the deviceless refresh continues
+          # the SAME duty cycle (login folding mono=boot "100% awake" would contradict the ~37%-awake
+          # refresh = incoherent). eventTime tracks MONOTONIC, so recency ~0 regardless of the gap.
+          # Three injects: declare locals at top; compute age/awake + monotonic offset; offs_boot gap.
+          perl -0777 -i -pe 's|(struct timespec64 wall_time, boot_offset, wall_to_mono;)|$1\n\tu64 gb_r; long gb_age, gb_awake, gb_susp;|' kernel/time/timekeeping.c
+          perl -0777 -i -pe 's|(wall_to_mono = timespec64_sub\(boot_offset, wall_time\);)|$1\n\tgb_r = random_get_entropy(); gb_age = 259200 + (gb_r % 345600); gb_awake = gb_age * (20 + ((gb_r / 345600) % 35)) / 100; gb_susp = gb_age - gb_awake; wall_to_mono.tv_sec += gb_awake;|' kernel/time/timekeeping.c
+          perl -0777 -i -pe 's|(tk_set_wall_to_mono\(tk, wall_to_mono\);)|$1\n\ttk->offs_boot = ktime_add(tk->offs_boot, ktime_set(gb_susp, 0));|' kernel/time/timekeeping.c
+          grep -q "gb_susp = gb_age - gb_awake" kernel/time/timekeeping.c || { echo FAIL-tkv2a; exit 1; }
+          grep -q "offs_boot, ktime_set(gb_susp" kernel/time/timekeeping.c || { echo FAIL-tkv2b; exit 1; }
+          echo "GB v2 coherent: age [3d,7d) + 20-54% awake (monotonic<boottime suspend gap) applied"
 
       - name: Build Normal Kernel
         env:
