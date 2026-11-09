@@ -541,6 +541,22 @@ jobs:
           grep -q "susfs_uptime_boot_off_current(); if(_o) boottime.tv_sec" fs/proc/stat.c     || { echo FAIL-statbtime; exit 1; }
           echo "GB full uptime spoof applied (clock_gettime + /proc/uptime + sysinfo + btime)"
 
+      - name: Apply GB v1 global monotonic offset (timekeeping)
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -euo pipefail
+          # GB v1 (login-seal recency fix): warm the GLOBAL monotonic+boottime clock by +5d at
+          # timekeeping_init so the device reports a plausible uptime from boot. The login member
+          # cross-checks MotionEvent.eventTime (uptimeMillis, kernel-stamped) vs the folded uptime;
+          # a fresh-boot mint folds a high uptime but the touch eventTime is ~real -> recency > ~2h
+          # -> rc16. A GLOBAL offset (not per-uid) makes eventTime, vDSO, /proc + system_server all
+          # agree (recency ~0). CLOCK_MONOTONIC = realtime + wall_to_monotonic, so bumping
+          # wall_to_mono by +5d shifts mono/boot only; REALTIME (xtime) stays = RTC.
+          perl -0777 -i -pe 's/(wall_to_mono = timespec64_sub\(boot_offset, wall_time\);)/$1\n\twall_to_mono.tv_sec += 432000;/' kernel/time/timekeeping.c
+          grep -q "wall_to_mono.tv_sec += 432000;" kernel/time/timekeeping.c || { echo FAIL-tkoffset; exit 1; }
+          echo "GB v1 global monotonic/boottime offset +5d applied (realtime untouched)"
+
       - name: Build Normal Kernel
         env:
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
