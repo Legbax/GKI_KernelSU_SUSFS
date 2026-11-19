@@ -541,35 +541,60 @@ jobs:
           grep -q "susfs_uptime_boot_off_current(); if(_o) boottime.tv_sec" fs/proc/stat.c     || { echo FAIL-statbtime; exit 1; }
           echo "GB full uptime spoof applied (clock_gettime + /proc/uptime + sysinfo + btime)"
 
-      - name: Apply GB v3 uniform monotonic offset (timekeeping)
+      - name: Apply GB v4 uniform uptime offset + idle coherence (timekeeping/proc)
         shell: bash
         working-directory: ${{ github.workspace }}/kernel/common
         run: |
           set -euo pipefail
-          # GB v3 (login-seal recency fix, de-correlated, UNIFORM): RANDOM global uptime offset in
-          # [3d,7d) per boot at timekeeping_init, applied EVENLY to EVERY uptime surface so they all
-          # agree. v2 SPLIT the offset (wall_to_mono += gb_awake for MONOTONIC, offs_boot += gb_susp for
-          # a BOOTTIME "suspend gap"), but offs_boot only reaches the kernel path (/proc/uptime=6.67d)
-          # and NOT the vDSO, so clock_gettime(CLOCK_BOOTTIME) read by the login member stayed at the
-          # MONOTONIC value (3.17d). Result on raven (measured 2026-11-19 via frida): clock_gettime(
-          # BOOTTIME) 3.17d  !=  /proc/uptime 6.67d  -> two reads of the SAME measurement disagreeing =
-          # the exact internal contradiction the server flags (Pixel 9 ground-truth has them identical,
-          # by kernel construction). v3 DROPS the offs_boot gap and offsets ONLY bases that propagate to
-          # every surface:
-          #   wall_to_mono.tv_sec += gb_age  -> CLOCK_MONOTONIC == CLOCK_BOOTTIME == /proc/uptime (vDSO
-          #                                     and kernel agree). mono==boot is the honest state of an
-          #                                     always-awake / plugged-in mint vehicle.
-          #   tk->raw_sec    += gb_age       -> CLOCK_MONOTONIC_RAW matches too (v2 left it at the real
-          #                                     ~minutes uptime = a leak).
-          # REALTIME (xtime) stays = RTC. The mint banks /proc/uptime as the account u_login; magnitude
-          # is unchanged (gb_age), so deviceless refresh continuity is preserved. (Residual: the idle
-          # column of /proc/uptime is scheduler accounting, not a clock base — tracked separately.)
+          # GB v4 (login-seal recency fix, de-correlated, FULLY COHERENT across EVERY uptime surface the
+          # member can read). RANDOM global uptime offset in [3d,7d) per boot at timekeeping_init.
+          #
+          # BACKGROUND. v2 SPLIT the offset (wall_to_mono += gb_awake for MONOTONIC, offs_boot += gb_susp
+          # for a BOOTTIME "suspend gap"), but offs_boot reaches ONLY the kernel path (/proc/uptime=6.67d)
+          # and NOT the vDSO, so clock_gettime(CLOCK_BOOTTIME) read by the member stayed at the MONOTONIC
+          # value (3.17d) -> clock_gettime(BOOTTIME) 3.17d != /proc/uptime 6.67d = two reads of the SAME
+          # measurement disagreeing (the exact internal contradiction the server flags). v3 fixed the
+          # CLOCK surfaces (wall_to_mono += gb_age -> MONO==BOOT==uptime col1 via vDSO+kernel; raw_sec +=
+          # gb_age -> MONOTONIC_RAW) but LEFT the /proc/uptime idle column (col2) and /proc/stat cpu idle
+          # leaking the real ~minutes idle: idle/uptime ~0 on a "6.67d" device = a fresh-boot tell.
+          #
+          # v4 closes the idle leak with a SINGLE per-boot source of truth shared across subsystems:
+          #   gb_age      (local)  = [3d,7d) s; += wall_to_mono (MONO==BOOT==/proc/uptime col1==sysinfo
+          #                          .uptime, vDSO+kernel) and += tk->raw_sec (MONOTONIC_RAW). REALTIME
+          #                          (xtime) stays = RTC, so /proc/stat btime (getboottime64 = now-uptime)
+          #                          is AUTOMATICALLY coherent (btime moves back by gb_age; btime+uptime=now).
+          #   gb_idle_age (GLOBAL) = gb_age * [2.30,2.79)  (Pixel-9 ground-truth idle/uptime ~2.56). The
+          #                          idle-seconds a device would have accrued over the inflated uptime.
+          #                          File-scope so /proc/uptime.c AND /proc/stat.c read the SAME value ->
+          #                          /proc/uptime col2 == /proc/stat aggregate cpu idle (mutually coherent).
+          #     - fs/proc/uptime.c col2 (idle.tv_sec)       += gb_idle_age
+          #     - fs/proc/stat.c   aggregate "cpu" idle (ns) += gb_idle_age * NSEC_PER_SEC
+          # The per-uid susfs clock_gettime/uptime hooks (prior step) stay inert on this global path
+          # (susfs_uptime_boot_off_current()==0 unless the sentinel is armed) -> no double count.
+          # The mint banks /proc/uptime col1 as the account u_login; gb_age magnitude unchanged -> refresh
+          # continuity preserved. gb_r high bits drive the idle multiplier -> de-correlated from gb_age.
+          #
+          # file-scope global = single source of truth for the idle offset (readers extern it):
+          perl -0777 -i -pe 's|(void __init timekeeping_init\(void\))|long gb_idle_age;\n$1|' kernel/time/timekeeping.c
+          # locals (gb_age stays a proven local, as v2/v3):
           perl -0777 -i -pe 's|(struct timespec64 wall_time, boot_offset, wall_to_mono;)|$1\n\tu64 gb_r; long gb_age;|' kernel/time/timekeeping.c
-          perl -0777 -i -pe 's|(wall_to_mono = timespec64_sub\(boot_offset, wall_time\);)|$1\n\tgb_r = random_get_entropy(); gb_age = 259200 + (gb_r % 345600); wall_to_mono.tv_sec += gb_age;|' kernel/time/timekeeping.c
+          # compute per-boot gb_age + gb_idle_age, inflate MONOTONIC/BOOTTIME base:
+          perl -0777 -i -pe 's|(wall_to_mono = timespec64_sub\(boot_offset, wall_time\);)|$1\n\tgb_r = random_get_entropy(); gb_age = 259200 + (gb_r % 345600); gb_idle_age = (gb_age * (230 + (long)((gb_r >> 20) % 50))) / 100; wall_to_mono.tv_sec += gb_age;|' kernel/time/timekeeping.c
+          # inflate MONOTONIC_RAW base:
           perl -0777 -i -pe 's|(tk_set_wall_to_mono\(tk, wall_to_mono\);)|$1\n\ttk->raw_sec += gb_age;|' kernel/time/timekeeping.c
-          grep -q "gb_age = 259200 + (gb_r % 345600); wall_to_mono.tv_sec += gb_age" kernel/time/timekeeping.c || { echo FAIL-tkv3a; exit 1; }
-          grep -q "tk->raw_sec += gb_age;" kernel/time/timekeeping.c || { echo FAIL-tkv3b; exit 1; }
-          echo "GB v3 uniform: gb_age [3d,7d) applied evenly to MONOTONIC+BOOTTIME (wall_to_mono) + MONOTONIC_RAW (raw_sec)"
+          # /proc/uptime col2 (idle) — the primary cross-check (idle/uptime ratio):
+          perl -0777 -i -pe 's|(idle\.tv_sec = div_u64_rem\(nsec, NSEC_PER_SEC, &rem\);)|$1\n\t{ extern long gb_idle_age; if (gb_idle_age) idle.tv_sec += gb_idle_age; }|' fs/proc/uptime.c
+          # /proc/stat aggregate "cpu" idle (ns) — keep it == /proc/uptime col2:
+          perl -0777 -i -pe 's|(seq_put_decimal_ull\(p, "cpu  ", nsec_to_clock_t\(user\)\);)|{ extern long gb_idle_age; if (gb_idle_age) idle += (u64)gb_idle_age * NSEC_PER_SEC; }\n\t$1|' fs/proc/stat.c
+          # guards (fail the build in seconds if any anchor missed):
+          grep -q "^long gb_idle_age;" kernel/time/timekeeping.c || { echo FAIL-tk-global; exit 1; }
+          grep -q "u64 gb_r; long gb_age;" kernel/time/timekeeping.c || { echo FAIL-tk-locals; exit 1; }
+          grep -q "gb_age = 259200 + (gb_r % 345600); gb_idle_age = (gb_age" kernel/time/timekeeping.c || { echo FAIL-tk-compute; exit 1; }
+          grep -q "wall_to_mono.tv_sec += gb_age;" kernel/time/timekeeping.c || { echo FAIL-tk-mono; exit 1; }
+          grep -q "tk->raw_sec += gb_age;" kernel/time/timekeeping.c || { echo FAIL-tk-raw; exit 1; }
+          grep -q "if (gb_idle_age) idle.tv_sec += gb_idle_age;" fs/proc/uptime.c || { echo FAIL-uptime-idle; exit 1; }
+          grep -q "if (gb_idle_age) idle += (u64)gb_idle_age \* NSEC_PER_SEC;" fs/proc/stat.c || { echo FAIL-stat-idle; exit 1; }
+          echo "GB v4 coherent: gb_age[3d,7d) -> MONO/BOOT/RAW/uptime-col1/sysinfo; gb_idle_age(~2.5x) -> /proc/uptime col2 + /proc/stat cpu idle; btime auto-coherent"
 
       - name: Build Normal Kernel
         env:
