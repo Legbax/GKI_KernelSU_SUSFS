@@ -541,31 +541,35 @@ jobs:
           grep -q "susfs_uptime_boot_off_current(); if(_o) boottime.tv_sec" fs/proc/stat.c     || { echo FAIL-statbtime; exit 1; }
           echo "GB full uptime spoof applied (clock_gettime + /proc/uptime + sysinfo + btime)"
 
-      - name: Apply GB v2 random monotonic offset (timekeeping)
+      - name: Apply GB v3 uniform monotonic offset (timekeeping)
         shell: bash
         working-directory: ${{ github.workspace }}/kernel/common
         run: |
           set -euo pipefail
-          # GB v2 (login-seal recency fix, de-correlated): RANDOM global monotonic+boottime offset in
-          # [3d,7d) per boot at timekeeping_init. The login member cross-checks MotionEvent.eventTime
-          # (uptimeMillis, kernel-stamped) vs the folded uptime; a GLOBAL offset makes eventTime, vDSO,
-          # /proc + system_server all agree (recency ~0) so days-uptime GRANTs (v1 proved rc13). v2
-          # picks a DISTINCT offset each boot (random_get_entropy = arch cycle counter) so each osprep
-          # reboot folds a different uptime -> seals de-correlated, not a fixed-+5d cohort (the v1 flaw).
-          # CLOCK_MONOTONIC = realtime + wall_to_monotonic; bumping wall_to_mono shifts mono/boot only,
-          # REALTIME (xtime) stays = RTC. The mint banks the resulting /proc/uptime as the account
-          # u_login (no master_seed needed at init, no post-fs-data knob, no mid-run jump).
-          # Coherent: monotonic (awake) = 20-54% of boottime (device age), matching virtual_clock's
-          # duty cycle, so the login folds mono<boot (realistic) AND the deviceless refresh continues
-          # the SAME duty cycle (login folding mono=boot "100% awake" would contradict the ~37%-awake
-          # refresh = incoherent). eventTime tracks MONOTONIC, so recency ~0 regardless of the gap.
-          # Three injects: declare locals at top; compute age/awake + monotonic offset; offs_boot gap.
-          perl -0777 -i -pe 's|(struct timespec64 wall_time, boot_offset, wall_to_mono;)|$1\n\tu64 gb_r; long gb_age, gb_awake, gb_susp;|' kernel/time/timekeeping.c
-          perl -0777 -i -pe 's|(wall_to_mono = timespec64_sub\(boot_offset, wall_time\);)|$1\n\tgb_r = random_get_entropy(); gb_age = 259200 + (gb_r % 345600); gb_awake = gb_age * (20 + ((gb_r / 345600) % 35)) / 100; gb_susp = gb_age - gb_awake; wall_to_mono.tv_sec += gb_awake;|' kernel/time/timekeeping.c
-          perl -0777 -i -pe 's|(tk_set_wall_to_mono\(tk, wall_to_mono\);)|$1\n\ttk->offs_boot = ktime_add(tk->offs_boot, ktime_set(gb_susp, 0));|' kernel/time/timekeeping.c
-          grep -q "gb_susp = gb_age - gb_awake" kernel/time/timekeeping.c || { echo FAIL-tkv2a; exit 1; }
-          grep -q "offs_boot, ktime_set(gb_susp" kernel/time/timekeeping.c || { echo FAIL-tkv2b; exit 1; }
-          echo "GB v2 coherent: age [3d,7d) + 20-54% awake (monotonic<boottime suspend gap) applied"
+          # GB v3 (login-seal recency fix, de-correlated, UNIFORM): RANDOM global uptime offset in
+          # [3d,7d) per boot at timekeeping_init, applied EVENLY to EVERY uptime surface so they all
+          # agree. v2 SPLIT the offset (wall_to_mono += gb_awake for MONOTONIC, offs_boot += gb_susp for
+          # a BOOTTIME "suspend gap"), but offs_boot only reaches the kernel path (/proc/uptime=6.67d)
+          # and NOT the vDSO, so clock_gettime(CLOCK_BOOTTIME) read by the login member stayed at the
+          # MONOTONIC value (3.17d). Result on raven (measured 2026-11-19 via frida): clock_gettime(
+          # BOOTTIME) 3.17d  !=  /proc/uptime 6.67d  -> two reads of the SAME measurement disagreeing =
+          # the exact internal contradiction the server flags (Pixel 9 ground-truth has them identical,
+          # by kernel construction). v3 DROPS the offs_boot gap and offsets ONLY bases that propagate to
+          # every surface:
+          #   wall_to_mono.tv_sec += gb_age  -> CLOCK_MONOTONIC == CLOCK_BOOTTIME == /proc/uptime (vDSO
+          #                                     and kernel agree). mono==boot is the honest state of an
+          #                                     always-awake / plugged-in mint vehicle.
+          #   tk->raw_sec    += gb_age       -> CLOCK_MONOTONIC_RAW matches too (v2 left it at the real
+          #                                     ~minutes uptime = a leak).
+          # REALTIME (xtime) stays = RTC. The mint banks /proc/uptime as the account u_login; magnitude
+          # is unchanged (gb_age), so deviceless refresh continuity is preserved. (Residual: the idle
+          # column of /proc/uptime is scheduler accounting, not a clock base — tracked separately.)
+          perl -0777 -i -pe 's|(struct timespec64 wall_time, boot_offset, wall_to_mono;)|$1\n\tu64 gb_r; long gb_age;|' kernel/time/timekeeping.c
+          perl -0777 -i -pe 's|(wall_to_mono = timespec64_sub\(boot_offset, wall_time\);)|$1\n\tgb_r = random_get_entropy(); gb_age = 259200 + (gb_r % 345600); wall_to_mono.tv_sec += gb_age;|' kernel/time/timekeeping.c
+          perl -0777 -i -pe 's|(tk_set_wall_to_mono\(tk, wall_to_mono\);)|$1\n\ttk->raw_sec += gb_age;|' kernel/time/timekeeping.c
+          grep -q "gb_age = 259200 + (gb_r % 345600); wall_to_mono.tv_sec += gb_age" kernel/time/timekeeping.c || { echo FAIL-tkv3a; exit 1; }
+          grep -q "tk->raw_sec += gb_age;" kernel/time/timekeeping.c || { echo FAIL-tkv3b; exit 1; }
+          echo "GB v3 uniform: gb_age [3d,7d) applied evenly to MONOTONIC+BOOTTIME (wall_to_mono) + MONOTONIC_RAW (raw_sec)"
 
       - name: Build Normal Kernel
         env:
