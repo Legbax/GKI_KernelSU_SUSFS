@@ -586,6 +586,9 @@ jobs:
           perl -0777 -i -pe 's|(idle\.tv_sec = div_u64_rem\(idle_nsec, NSEC_PER_SEC, &rem\);)|$1\n\t{ extern long gb_idle_age; if (gb_idle_age) idle.tv_sec += gb_idle_age; }|' fs/proc/uptime.c
           # /proc/stat aggregate "cpu" idle (ns) — keep it == /proc/uptime col2:
           perl -0777 -i -pe 's|(seq_put_decimal_ull\(p, "cpu  ", nsec_to_clock_t\(user\)\);)|{ extern long gb_idle_age; if (gb_idle_age) idle += (u64)gb_idle_age * NSEC_PER_SEC; }\n\t$1|' fs/proc/stat.c
+          # /proc/stat per-cpu "cpuN" idle — distribute the SAME total so sum(cpuN idle)==cpu aggregate
+          # (a real non-hotplugged device has them equal; an aggregate-only inflation would be a tell):
+          perl -0777 -i -pe 's|(idle\s+= get_idle_time\(&kcpustat, i\);)|$1\n\t\t{ extern long gb_idle_age; if (gb_idle_age) idle += (u64)gb_idle_age * NSEC_PER_SEC / num_online_cpus(); }|' fs/proc/stat.c
           # guards (fail the build in seconds if any anchor missed):
           grep -q "^long gb_idle_age;" kernel/time/timekeeping.c || { echo FAIL-tk-global; exit 1; }
           grep -q "u64 gb_r; long gb_age;" kernel/time/timekeeping.c || { echo FAIL-tk-locals; exit 1; }
@@ -594,7 +597,8 @@ jobs:
           grep -q "tk->raw_sec += gb_age;" kernel/time/timekeeping.c || { echo FAIL-tk-raw; exit 1; }
           grep -q "if (gb_idle_age) idle.tv_sec += gb_idle_age;" fs/proc/uptime.c || { echo FAIL-uptime-idle; exit 1; }
           grep -q "if (gb_idle_age) idle += (u64)gb_idle_age \* NSEC_PER_SEC;" fs/proc/stat.c || { echo FAIL-stat-idle; exit 1; }
-          echo "GB v4 coherent: gb_age[3d,7d) -> MONO/BOOT/RAW/uptime-col1/sysinfo; gb_idle_age(~2.5x) -> /proc/uptime col2 + /proc/stat cpu idle; btime auto-coherent"
+          grep -q "idle += (u64)gb_idle_age \* NSEC_PER_SEC / num_online_cpus();" fs/proc/stat.c || { echo FAIL-stat-percpu-idle; exit 1; }
+          echo "GB v4 coherent: gb_age[3d,7d) -> MONO/BOOT/RAW/uptime-col1/sysinfo; gb_idle_age(~2.5x) -> /proc/uptime col2 + /proc/stat cpu idle (aggregate + per-cpu); btime auto-coherent"
 
       - name: Build Normal Kernel
         env:
