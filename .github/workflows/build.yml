@@ -583,7 +583,7 @@ jobs:
           # inflate MONOTONIC_RAW base:
           perl -0777 -i -pe 's|(tk_set_wall_to_mono\(tk, wall_to_mono\);)|$1\n\ttk->raw_sec += gb_age;|' kernel/time/timekeeping.c
           # /proc/uptime col2 (idle) — the primary cross-check (idle/uptime ratio):
-          perl -0777 -i -pe 's|(idle\.tv_sec = div_u64_rem\(nsec, NSEC_PER_SEC, &rem\);)|$1\n\t{ extern long gb_idle_age; if (gb_idle_age) idle.tv_sec += gb_idle_age; }|' fs/proc/uptime.c
+          perl -0777 -i -pe 's|(idle\.tv_sec = div_u64_rem\(idle_nsec, NSEC_PER_SEC, &rem\);)|$1\n\t{ extern long gb_idle_age; if (gb_idle_age) idle.tv_sec += gb_idle_age; }|' fs/proc/uptime.c
           # /proc/stat aggregate "cpu" idle (ns) — keep it == /proc/uptime col2:
           perl -0777 -i -pe 's|(seq_put_decimal_ull\(p, "cpu  ", nsec_to_clock_t\(user\)\);)|{ extern long gb_idle_age; if (gb_idle_age) idle += (u64)gb_idle_age * NSEC_PER_SEC; }\n\t$1|' fs/proc/stat.c
           # guards (fail the build in seconds if any anchor missed):
