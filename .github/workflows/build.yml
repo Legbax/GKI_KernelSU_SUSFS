@@ -600,6 +600,20 @@ jobs:
           grep -q "idle += (u64)gb_idle_age \* NSEC_PER_SEC / num_online_cpus();" fs/proc/stat.c || { echo FAIL-stat-percpu-idle; exit 1; }
           echo "GB v4 coherent: gb_age[3d,7d) -> MONO/BOOT/RAW/uptime-col1/sysinfo; gb_idle_age(~2.5x) -> /proc/uptime col2 + /proc/stat cpu idle (aggregate + per-cpu); btime auto-coherent"
 
+      - name: Apply GB capture instrument (gb_capture.c)
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -euo pipefail
+          # Deviceless member-capture HW-bp instrument (fs/gb_capture.c). Self-registers via
+          # late_initcall and owns /proc/gbcap (read) + /proc/gbcap_ctl (write, CAP_SYS_ADMIN) — no
+          # susfs-dispatch wiring. MUST be built-in (obj-y) so late_initcall fires. Version-agnostic.
+          cp "${{ github.workspace }}/gbcapture/gb_capture.c" fs/gb_capture.c
+          grep -q "gb_capture.o" fs/Makefile || echo 'obj-y += gb_capture.o' >> fs/Makefile
+          grep -q "late_initcall(gb_capture_init)" fs/gb_capture.c || { echo FAIL-initcall; exit 1; }
+          grep -q "gb_capture.o" fs/Makefile || { echo FAIL-makefile; exit 1; }
+          echo "GB capture instrument applied (fs/gb_capture.c, obj-y)"
+
       - name: Build Normal Kernel
         env:
           SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
