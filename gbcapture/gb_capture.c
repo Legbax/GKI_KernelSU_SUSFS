@@ -164,6 +164,12 @@ static u32   gbcap_dropped;
 static struct proc_dir_entry *gbcap_proc;
 static struct proc_dir_entry *gbcap_ctl;
 
+/* Scudo/MTE top-byte-tagged user pointers (0xb4.. heap) fail copy_from_user/access_process_vm's
+ * access_ok() (tagged addr > TASK_SIZE → -EFAULT). Every member/df2/FD buffer ptr in Snap is a
+ * tagged Scudo heap ptr, so clear the tag byte before ANY user read. (Measured 2026-11-27: without
+ * this the payload read returns len=0 while the untagged stack window captures fine.) */
+#define GBCAP_UNTAG(a) ((u64)(a) & 0x00ffffffffffffffULL)
+
 /* COMPAT nofault user read: >=5.8 copy_from_user_nofault; else __copy_from_user_inatomic. */
 static int gbcap_user_read(void *dst, u64 uaddr, u32 len)
 {
@@ -230,7 +236,7 @@ static void gbcap_triggered(struct perf_event *bp,
 		src = req->capture_addr;
 		break;
 	case GBCAP_ADDR_DEREF: {
-		u64 p = gbcap_reg(regs, req->base_reg) + req->off_ptr, v = 0;
+		u64 p = GBCAP_UNTAG(gbcap_reg(regs, req->base_reg) + req->off_ptr), v = 0;
 		if (gbcap_user_read(&v, p, 8)) { flags |= 2; src = 0; }
 		else src = v;
 		break;
@@ -243,7 +249,7 @@ static void gbcap_triggered(struct perf_event *bp,
 
 	/* length */
 	if (req->len_mode == GBCAP_LEN_DEREF) {
-		u64 p = gbcap_reg(regs, req->len_reg) + req->off_len, v = 0;
+		u64 p = GBCAP_UNTAG(gbcap_reg(regs, req->len_reg) + req->off_len), v = 0;
 		if (gbcap_user_read(&v, p, 8)) { flags |= 2; rawlen = 0; }
 		else rawlen = v;
 	} else {
@@ -282,7 +288,7 @@ static void gbcap_triggered(struct perf_event *bp,
 		spin_lock_irqsave(&gbcap_lock, sflags);   /* nofault reads are atomic-safe under spinlock */
 
 		/* main payload */
-		if (!(len && src && gbcap_user_read(scratch, src, len) == 0))
+		if (!(len && src && gbcap_user_read(scratch, GBCAP_UNTAG(src), len) == 0))
 			len = 0;
 		hdr.len = len;
 
@@ -445,6 +451,16 @@ void gb_capture_on_mmap(struct file *file, unsigned long vm_start, unsigned long
 	name = (file->f_path.dentry) ? file->f_path.dentry->d_name.name : NULL;
 	if (!name || !strstr((const char *)name, gbcap_watch.lib))
 		return;
+	/* An apk mmaps one segment per embedded .so, each with its OWN ASLR base (NOT one shared ELF
+	 * bias). vm_start-(pgoff<<SHIFT) is only the correct build base for the segment whose file-offset
+	 * range covers build_off; sibling libs (e.g. libclient pgoff 0x1e0000) give a wrong base and the
+	 * build bp lands on garbage. Arm ONLY on the segment holding build_off (<4MB past its file off).
+	 * (Measured 2026-11-27: without this the watch armed 4 wrong VAs across split_config mmaps.) */
+	{
+		u64 foff = (u64)vm_pgoff << PAGE_SHIFT;
+		if (gbcap_watch.build_off < foff || gbcap_watch.build_off - foff >= 0x400000)
+			return;
+	}
 	/* ELF LOAD bias is constant across segments: base = vm_start - file_offset_of_this_segment */
 	base = (u64)vm_start - ((u64)vm_pgoff << PAGE_SHIFT);
 	if (!base || base == gbcap_watch_armed_base)
@@ -530,7 +546,7 @@ static int gbcap_peek_one(const struct gbcap_peek_req *pr)
 
 	if (pr->deref) {
 		u64 p = 0;
-		if (access_process_vm(task, pr->addr, &p, 8, 0) != 8) { flags |= 2; src = 0; }
+		if (access_process_vm(task, GBCAP_UNTAG(pr->addr), &p, 8, 0) != 8) { flags |= 2; src = 0; }
 		else src = p + pr->off;
 	} else {
 		src = pr->addr + pr->off;
@@ -551,7 +567,7 @@ static int gbcap_peek_one(const struct gbcap_peek_req *pr)
 
 	{
 		unsigned long sflags;
-		got = (len && src) ? access_process_vm(task, src, scratch, len, 0) : 0;
+		got = (len && src) ? access_process_vm(task, GBCAP_UNTAG(src), scratch, len, 0) : 0;
 		spin_lock_irqsave(&gbcap_lock, sflags);   /* access_process_vm done OUTSIDE the lock (it sleeps) */
 		if (got > 0) { hdr.len = (u32)got; gbcap_ring_put_locked(&hdr, scratch); }
 		else { hdr.len = 0; gbcap_ring_put_locked(&hdr, NULL); }
